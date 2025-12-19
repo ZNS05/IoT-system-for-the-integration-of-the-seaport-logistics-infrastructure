@@ -9,13 +9,14 @@ from pika.exceptions import AMQPConnectionError, StreamLostError
 import os
 
 # MongoDB
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017")
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["iot_port"]
 measurements_col = db["measurements"]
 
+
 # RabbitMQ
-RABBIT_HOST = os.getenv("RABBIT_HOST", "localhost")
+RABBIT_HOST = os.getenv("RABBIT_HOST", "rabbitmq")
 RABBIT_EXCHANGE = os.getenv("RABBIT_EXCHANGE", "iot_data")
 
 rabbit_connection = None
@@ -70,7 +71,6 @@ def rabbit_publish(doc: dict):
             routing_key="",
             body=body,
         )
-
 
 
 # FastAPI

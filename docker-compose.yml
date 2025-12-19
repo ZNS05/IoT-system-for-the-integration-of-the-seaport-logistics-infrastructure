@@ -18,5 +18,35 @@ services:
       - "5672:5672"
       - "15672:15672"
 
+  rule-engine:
+    build: ./rule-engine
+    container_name: rule-engine
+    restart: unless-stopped
+    environment:
+      RABBIT_HOST: rabbitmq
+      RABBIT_EXCHANGE: iot_data
+      RABBIT_QUEUE: rule_engine_input
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: iot_port
+      ALERTS_COLLECTION: alerts
+    depends_on:
+      - mongo
+      - rabbitmq
+
+  iot-controller:
+    build: ./iot-controller
+    container_name: iot-controller
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      RABBIT_HOST: rabbitmq
+      RABBIT_EXCHANGE: iot_data
+    depends_on:
+      - mongo
+      - rabbitmq
+
+
 volumes:
   mongo_data:
