@@ -8,6 +8,11 @@ import pika
 from pika.exceptions import AMQPConnectionError, StreamLostError
 import os
 
+import threading
+import queue
+import time
+
+
 # MongoDB
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017")
 mongo_client = MongoClient(MONGO_URI)
@@ -18,6 +23,9 @@ measurements_col = db["measurements"]
 # RabbitMQ
 RABBIT_HOST = os.getenv("RABBIT_HOST", "rabbitmq")
 RABBIT_EXCHANGE = os.getenv("RABBIT_EXCHANGE", "iot_data")
+
+publish_queue: "queue.Queue[dict]" = queue.Queue(maxsize=5000)
+stop_event = threading.Event()
 
 rabbit_connection = None
 rabbit_channel = None
@@ -79,11 +87,14 @@ app = FastAPI(title="IoT Controller - Port Terminal")
 
 @app.on_event("startup")
 def on_startup():
+    t = threading.Thread(target=rabbit_publisher_worker, daemon=True)
+    t.start()
     rabbit_connect()
 
 
 @app.on_event("shutdown")
 def on_shutdown():
+    stop_event.set()
     global rabbit_connection
     try:
         if rabbit_connection is not None and rabbit_connection.is_open:
@@ -126,10 +137,43 @@ def ingest(payload: Telemetry):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MongoDB error: {e}")
 
+
     # RabbitMQ
     try:
-        rabbit_publish(doc)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RabbitMQ error: {e}")
+        publish_queue.put_nowait(doc)
+    except queue.Full:
+        # если очередь на публикацию переполнена — можно вернуть 503
+        raise HTTPException(
+            status_code=503, detail="Publish queue is full, try later")
 
     return {"inserted_id": str(result.inserted_id)}
+
+
+def rabbit_publisher_worker():
+    """
+    Единственный поток, который публикует в RabbitMQ.
+    Это убирает гонки и падения канала.
+    """
+    rabbit_connect()  # гарантируем соединение в этом потоке
+
+    while not stop_event.is_set():
+        try:
+            doc = publish_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        try:
+            rabbit_publish(doc)
+        except Exception as e:
+            # если RabbitMQ временно умер — не валим процесс, пробуем позже
+            print("Rabbit publisher error:", e)
+            time.sleep(1)
+            # можно вернуть сообщение назад, чтобы не потерять
+            try:
+                publish_queue.put_nowait(doc)
+            except queue.Full:
+                # если очередь переполнена — теряем сообщение (для лабы допустимо),
+                # но лучше логировать.
+                print("Publish queue is full, dropping message")
+        finally:
+            publish_queue.task_done()

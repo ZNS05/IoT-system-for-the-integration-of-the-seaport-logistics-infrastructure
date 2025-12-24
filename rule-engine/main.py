@@ -165,7 +165,7 @@ def on_message(ch, method, properties, body):
             print(f"!!! RULES TRIGGERED: {triggered}")
         else:
             print("No rules triggered.")
-            
+
         time.sleep(2)
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -175,6 +175,8 @@ def on_message(ch, method, properties, body):
         print(f"ERROR while processing message: {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
+
+channel.basic_qos(prefetch_count=10)
 
 channel.basic_consume(
     queue=QUEUE_NAME,

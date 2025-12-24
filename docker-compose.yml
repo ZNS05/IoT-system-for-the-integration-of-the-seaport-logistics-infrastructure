@@ -20,7 +20,7 @@ services:
 
   rule-engine:
     build: ./rule-engine
-    container_name: rule-engine
+    #container_name: rule-engine
     restart: unless-stopped
     environment:
       RABBIT_HOST: rabbitmq
@@ -35,10 +35,10 @@ services:
 
   iot-controller:
     build: ./iot-controller
-    container_name: iot-controller
+    #container_name: iot-controller
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    #ports:
+     # - "8000:8000"
     environment:
       MONGO_URI: mongodb://mongo:27017
       RABBIT_HOST: rabbitmq
@@ -46,6 +46,33 @@ services:
     depends_on:
       - mongo
       - rabbitmq
+
+  data-simulator:
+    build: ./data-simulator
+    container_name: iot-data-simulator
+    restart: unless-stopped
+    depends_on:
+      - iot-controller
+    environment:
+      API_URL: "http://iot-controller:8000/ingest"
+      DEVICE_COUNT: "20"
+      MSG_RATE_PER_DEVICE: "0.5"
+      CRANE_RATIO: "0.2"
+      FORKLIFT_RATIO: "0.5"
+      TRUCK_RATIO: "0.3"
+      OVERLOAD_PROB: "0.05"
+      OVERHEAT_PROB: "0.10"
+
+  gateway:
+    image: nginx:alpine
+    container_name: iot-gateway
+    depends_on:
+      - iot-controller
+    ports:
+      - "8000:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
 
 
 volumes:
