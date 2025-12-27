@@ -44,6 +44,17 @@ OVERHEAT_CONSECUTIVE_REQUIRED = 10       # пакетов подряд
 overheat_streak_by_device: dict[int, int] = {}
 
 
+def log_json(service: str, level: str, event: str, **fields):
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "service": service,
+        "level": level,
+        "event": event,
+        **fields
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -86,6 +97,11 @@ def apply_rules(telemetry: dict):
     if device_type == "crane" and isinstance(load_weight, (int, float)) and load_weight > CRANE_OVERLOAD_THRESHOLD:
         rule_id = "CRANE_OVERLOAD"
         triggered.append(rule_id)
+        log_json("rule-engine", "WARN", "RULE_TRIGGERED",
+                 rule_id=rule_id,
+                 device_id=telemetry.get("device_id"),
+                 device_type=telemetry.get("device_type"))
+
         create_alert(
             rule_id=rule_id,
             severity="HIGH",

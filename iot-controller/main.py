@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -29,6 +30,17 @@ stop_event = threading.Event()
 
 rabbit_connection = None
 rabbit_channel = None
+
+
+def log_json(service: str, level: str, event: str, **fields):
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "service": service,
+        "level": level,
+        "event": event,
+        **fields
+    }
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def rabbit_connect():
@@ -131,6 +143,16 @@ def ingest(payload: Telemetry):
     if doc["timestamp"] is None:
         doc["timestamp"] = datetime.utcnow()
 
+    log_json(
+        "iot-controller",
+        "INFO",
+        "INGEST_RECEIVED",
+        device_id=doc.get("device_id"),
+        device_type=doc.get("device_type"),
+        location=doc.get("location")
+    )
+
+
     # MongoDB
     try:
         result = measurements_col.insert_one(doc)
@@ -142,6 +164,9 @@ def ingest(payload: Telemetry):
     try:
         publish_queue.put_nowait(doc)
     except queue.Full:
+        log_json("iot-controller", "WARN", "PUBLISH_QUEUE_FULL",
+                 device_id=doc.get("device_id"))
+
         # если очередь на публикацию переполнена — можно вернуть 503
         raise HTTPException(
             status_code=503, detail="Publish queue is full, try later")

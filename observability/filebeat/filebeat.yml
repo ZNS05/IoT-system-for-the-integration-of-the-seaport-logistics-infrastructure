@@ -1,0 +1,27 @@
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: false
+      templates:
+        - condition:
+            or:
+              - contains:
+                  docker.container.name: "iot-iot-controller"
+              - contains:
+                  docker.container.name: "iot-rule-engine"
+              - contains:
+                  docker.container.name: "iot-data-simulator"
+          config:
+            - type: container
+              format: auto
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+
+processors:
+  - add_docker_metadata: {}
+
+output.logstash:
+  hosts: ["logstash:5044"]
+
+# чтобы руками видеть, что оно реально читает
+logging.level: info
