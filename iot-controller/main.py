@@ -1,3 +1,5 @@
+from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi import FastAPI
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -96,6 +98,8 @@ def rabbit_publish(doc: dict):
 # FastAPI
 app = FastAPI(title="IoT Controller - Port Terminal")
 
+
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 @app.on_event("startup")
 def on_startup():

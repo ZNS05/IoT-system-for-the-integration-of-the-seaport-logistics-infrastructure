@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   mongo:
     image: mongo:8.0
@@ -9,6 +7,12 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' | grep 1 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -17,11 +21,39 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  iot-controller:
+    build: ./iot-controller
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      RABBIT_HOST: rabbitmq
+      RABBIT_EXCHANGE: iot_data
+    depends_on:
+      - mongo
+      - rabbitmq
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=2).read(); print('ok')\" >/dev/null 2>&1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   rule-engine:
     build: ./rule-engine
-    #container_name: rule-engine
     restart: unless-stopped
+    ports:
+      - "9101:9101"
     environment:
       RABBIT_HOST: rabbitmq
       RABBIT_EXCHANGE: iot_data
@@ -29,23 +61,20 @@ services:
       MONGO_URI: mongodb://mongo:27017
       MONGO_DB: iot_port
       ALERTS_COLLECTION: alerts
+      METRICS_PORT: "9101"
     depends_on:
       - mongo
       - rabbitmq
-
-  iot-controller:
-    build: ./iot-controller
-    #container_name: iot-controller
-    restart: unless-stopped
-    #ports:
-     # - "8000:8000"
-    environment:
-      MONGO_URI: mongodb://mongo:27017
-      RABBIT_HOST: rabbitmq
-      RABBIT_EXCHANGE: iot_data
-    depends_on:
-      - mongo
-      - rabbitmq
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2).read(); print('ok')\" >/dev/null 2>&1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   data-simulator:
     build: ./data-simulator
@@ -55,65 +84,66 @@ services:
       - iot-controller
     environment:
       API_URL: "http://iot-controller:8000/ingest"
-      DEVICE_COUNT: "20"
-      MSG_RATE_PER_DEVICE: "0.5"
-      CRANE_RATIO: "0.2"
-      FORKLIFT_RATIO: "0.5"
+      DEVICE_COUNT: "10"
+      MSG_RATE_PER_DEVICE: "1"
+      CRANE_RATIO: "0.3"
+      FORKLIFT_RATIO: "0.4"
       TRUCK_RATIO: "0.3"
-      OVERLOAD_PROB: "0.05"
+      OVERLOAD_PROB: "0.15"
       OVERHEAT_PROB: "0.10"
+      OVERHEAT_EPISODE_LEN: "10"
 
   gateway:
     image: nginx:alpine
     container_name: iot-gateway
+    restart: unless-stopped
     depends_on:
       - iot-controller
     ports:
       - "8000:80"
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
-    restart: unless-stopped
-
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
     container_name: iot-elasticsearch
+    restart: unless-stopped
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
     ports:
       - "9200:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
-    restart: unless-stopped
 
   kibana:
     image: docker.elastic.co/kibana/kibana:8.14.3
     container_name: iot-kibana
+    restart: unless-stopped
     environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
     ports:
       - "5601:5601"
     depends_on:
       - elasticsearch
-    restart: unless-stopped
 
   logstash:
     image: docker.elastic.co/logstash/logstash:8.14.3
     container_name: iot-logstash
-    ports:
-      - "5044:5044"
+    restart: unless-stopped
     volumes:
       - ./observability/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "15044:5044"
     depends_on:
       - elasticsearch
-    restart: unless-stopped
 
   filebeat:
     image: docker.elastic.co/beats/filebeat:8.14.3
     container_name: iot-filebeat
     user: root
+    restart: unless-stopped
     command: ["--strict.perms=false", "-e", "-d", "*"]
     volumes:
       - ./observability/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
@@ -121,9 +151,32 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - logstash
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: iot-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - iot-controller
+      - rule-engine
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: iot-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
 
 volumes:
   mongo_data:
   es_data:
+  grafana_data:

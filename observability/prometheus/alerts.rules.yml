@@ -1,0 +1,29 @@
+groups:
+  - name: iot_core
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"iot-controller|rule-engine"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service down: {{ $labels.job }}"
+          description: "Target {{ $labels.instance }} for job={{ $labels.job }} is DOWN."
+
+      - alert: RuleEngineHighErrorRate
+        expr: rate(rule_engine_messages_total{status="error"}[2m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rule-engine errors detected"
+          description: "Errors rate is > 0 for 1m on {{ $labels.instance }}"
+
+      - alert: HighP95LatencyIotController
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="iot-controller"}[2m]))) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High P95 latency on iot-controller"
+          description: "P95 latency is above 0.5s for 2m."
