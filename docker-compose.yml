@@ -31,6 +31,8 @@ services:
   iot-controller:
     build: ./iot-controller
     restart: unless-stopped
+    expose:
+      - "8000"
     environment:
       MONGO_URI: mongodb://mongo:27017
       RABBIT_HOST: rabbitmq
@@ -52,8 +54,8 @@ services:
   rule-engine:
     build: ./rule-engine
     restart: unless-stopped
-    ports:
-      - "9101:9101"
+    expose:
+      - "9101"
     environment:
       RABBIT_HOST: rabbitmq
       RABBIT_EXCHANGE: iot_data
@@ -62,9 +64,12 @@ services:
       MONGO_DB: iot_port
       ALERTS_COLLECTION: alerts
       METRICS_PORT: "9101"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     depends_on:
       - mongo
       - rabbitmq
+      - redis
     healthcheck:
       test:
         [
@@ -84,8 +89,8 @@ services:
       - iot-controller
     environment:
       API_URL: "http://iot-controller:8000/ingest"
-      DEVICE_COUNT: "10"
-      MSG_RATE_PER_DEVICE: "1"
+      DEVICE_COUNT: "50"
+      MSG_RATE_PER_DEVICE: "2"
       CRANE_RATIO: "0.3"
       FORKLIFT_RATIO: "0.4"
       TRUCK_RATIO: "0.3"
@@ -174,6 +179,14 @@ services:
     depends_on:
       - prometheus
     restart: unless-stopped
+
+
+  redis:
+    image: redis:7-alpine
+    container_name: iot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
 
 
 volumes:

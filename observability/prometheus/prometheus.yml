@@ -1,17 +1,21 @@
 global:
   scrape_interval: 5s
-  evaluation_interval: 5s
-
-rule_files:
-  - /etc/prometheus/rules/*.yml
 
 scrape_configs:
   - job_name: "iot-controller"
     metrics_path: /metrics
-    static_configs:
-      - targets: ["iot-controller:8000"]
+    dns_sd_configs:
+      - names:
+          - "iot-controller"
+        type: "A"
+        port: 8000
+        refresh_interval: 5s
 
   - job_name: "rule-engine"
     metrics_path: /metrics
-    static_configs:
-      - targets: ["rule-engine:9101"]
+    dns_sd_configs:
+      - names:
+          - "rule-engine"
+        type: "A"
+        port: 9101
+        refresh_interval: 5s

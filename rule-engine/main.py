@@ -1,17 +1,16 @@
 from datetime import datetime, timezone
 import os
 import json
-from datetime import datetime
+import time
 
 import pika
+from pika.exceptions import AMQPConnectionError
 from pymongo import MongoClient
 
-import time
-from pika.exceptions import AMQPConnectionError
+import redis
+from redis.exceptions import RedisError
 
 from prometheus_client import start_http_server, Counter, Histogram, Gauge
-
-
 
 
 # =========================
@@ -27,9 +26,16 @@ ALERTS_COLLECTION = os.getenv("ALERTS_COLLECTION", "alerts")
 
 METRICS_PORT = int(os.getenv("METRICS_PORT", "9101"))
 
+# Redis (для масштабирования state)
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_STREAK_TTL_SEC = int(os.getenv("REDIS_STREAK_TTL_SEC", "3600"))
+
 print("MONGO_URI =", MONGO_URI)
 print("MONGO_DB =", MONGO_DB)
 print("ALERTS_COLLECTION =", ALERTS_COLLECTION)
+print("REDIS =", f"{REDIS_HOST}:{REDIS_PORT}")
+
 
 # =========================
 # MongoDB
@@ -39,6 +45,22 @@ db = mongo_client[MONGO_DB]
 alerts_col = db[ALERTS_COLLECTION]
 
 
+# =========================
+# Redis
+# =========================
+redis_client = redis.Redis(
+    host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+try:
+    redis_client.ping()
+    print(f"[Redis] Connected to {REDIS_HOST}:{REDIS_PORT}")
+except RedisError as e:
+    # Не падаем сразу, но будет видно по логам — правила по streak не будут работать корректно
+    print(f"[Redis] ERROR: cannot connect to Redis: {e}")
+
+
+# =========================
+# Prometheus metrics
+# =========================
 MESSAGES_TOTAL = Counter(
     "rule_engine_messages_total",
     "Total messages processed by rule-engine",
@@ -62,21 +84,6 @@ OVERHEAT_STREAK = Gauge(
     ["device_id"]
 )
 
-
-
-# =========================
-# Rules config (минимально)
-# =========================
-CRANE_OVERLOAD_THRESHOLD = 20.0          # тонн
-OVERHEAT_THRESHOLD = 60.0                # °C
-OVERHEAT_CONSECUTIVE_REQUIRED = 10       # пакетов подряд
-
-# state для длящихся правил: по device_id считаем подряд "горячие" пакеты
-overheat_streak_by_device: dict[int, int] = {}
-
-# =========================
-# Prometheus metrics
-# =========================
 telemetry_messages_processed_total = Counter(
     "telemetry_messages_processed_total",
     "Total number of telemetry messages processed by rule-engine"
@@ -97,6 +104,14 @@ telemetry_processing_seconds = Histogram(
     "telemetry_processing_seconds",
     "Time spent processing a telemetry message in rule-engine"
 )
+
+
+# =========================
+# Rules config
+# =========================
+CRANE_OVERLOAD_THRESHOLD = 20.0          # тонн
+OVERHEAT_THRESHOLD = 60.0               # °C
+OVERHEAT_CONSECUTIVE_REQUIRED = 10      # пакетов подряд
 
 
 def log_json(service: str, level: str, event: str, **fields):
@@ -149,7 +164,6 @@ def to_float(x):
             return float(x)
         except ValueError:
             return None
-    # на случай экзотики типа Decimal128/объектов
     try:
         return float(x)
     except Exception:
@@ -162,6 +176,10 @@ def to_int(x):
     if isinstance(x, str) and x.isdigit():
         return int(x)
     return None
+
+
+def _streak_key(device_id: int) -> str:
+    return f"overheat_streak:{device_id}"
 
 
 def apply_rules(telemetry: dict):
@@ -197,18 +215,26 @@ def apply_rules(telemetry: dict):
             telemetry=telemetry
         )
 
-    # 2) OVERHEAT_RISK_10 (10 подряд)
+    # 2) OVERHEAT_RISK_10 (10 подряд) — state в Redis
     if device_id is not None:
-        if temperature is not None and temperature > OVERHEAT_THRESHOLD:
-            overheat_streak_by_device[device_id] = overheat_streak_by_device.get(
-                device_id, 0) + 1
-        else:
-            overheat_streak_by_device[device_id] = 0
+        streak = 0
+        key = _streak_key(device_id)
 
-        OVERHEAT_STREAK.labels(device_id=str(device_id)).set(
-            overheat_streak_by_device[device_id])
+        try:
+            if temperature is not None and temperature > OVERHEAT_THRESHOLD:
+                streak = int(redis_client.incr(key))
+                redis_client.expire(key, REDIS_STREAK_TTL_SEC)
+            else:
+                redis_client.delete(key)
+                streak = 0
+        except RedisError as e:
+            # если Redis недоступен — не валим сервис, но streak будет некорректен
+            print(f"[Redis] ERROR while updating streak: {e}")
+            streak = 0
 
-        if overheat_streak_by_device[device_id] >= OVERHEAT_CONSECUTIVE_REQUIRED:
+        OVERHEAT_STREAK.labels(device_id=str(device_id)).set(streak)
+
+        if streak >= OVERHEAT_CONSECUTIVE_REQUIRED:
             rule_id = "OVERHEAT_RISK_10"
             triggered.append(rule_id)
 
@@ -223,15 +249,23 @@ def apply_rules(telemetry: dict):
                 telemetry=telemetry
             )
 
-            overheat_streak_by_device[device_id] = 0
+            # сброс, чтобы не спамить
+            try:
+                redis_client.delete(key)
+            except RedisError:
+                pass
+
             OVERHEAT_STREAK.labels(device_id=str(device_id)).set(0)
 
     return triggered
 
 
-
+# =========================
+# Metrics server
+# =========================
 start_http_server(METRICS_PORT)
 print(f"[Metrics] Prometheus metrics available on :{METRICS_PORT}/metrics")
+
 
 # =========================
 # RabbitMQ connection
@@ -256,7 +290,6 @@ def connect_rabbit_with_retry():
 connection = connect_rabbit_with_retry()
 channel = connection.channel()
 
-
 channel.exchange_declare(
     exchange=RABBIT_EXCHANGE,
     exchange_type="fanout",
@@ -277,7 +310,7 @@ def on_message(ch, method, properties, body):
         telemetry_messages_processed_total.inc()
 
         print("\n--- New message received ---")
-        print(json.dumps(telemetry, indent=2))
+        print(json.dumps(telemetry, indent=2, ensure_ascii=False))
 
         triggered = apply_rules(telemetry)
 
