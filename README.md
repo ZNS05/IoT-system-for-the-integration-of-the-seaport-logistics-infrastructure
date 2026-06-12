@@ -2,185 +2,133 @@
 
 ## Описание проекта
 
-Данный проект представляет собой IoT-платформу для сбора телеметрии от устройств, обработки данных в реальном времени, применения бизнес-правил (Rule Engine), генерации алертов и наблюдаемости системы (Observability).
+Проект реализует backend-прототип IoT-платформы для сбора и обработки телеметрии портовой инфраструктуры: кранов, погрузчиков и грузового транспорта.
 
-Система моделирует работу портовой IoT-инфраструктуры (краны, погрузчики, грузовики) и предназначена для демонстрации:
-
-- event-driven архитектуры
-- потоковой обработки телеметрии
-- применения правил в реальном времени
-- мониторинга и логирования микросервисов
-
----
+Архитектура соответствует событийно-ориентированному подходу из `Этап_№1.docx`: данные принимаются через API Gateway, валидируются FastAPI-сервисом, сохраняются в MongoDB и асинхронно передаются через RabbitMQ в Rule Engine. Для краткоживущего состояния правил используется Redis, для метрик - Prometheus/Grafana, для логов - Filebeat/Logstash/Elasticsearch/Kibana.
 
 ## Архитектура
 
-```
+```text
 Data Simulator
-      ↓ HTTP
+      ↓ HTTP/JSON
 Gateway (Nginx)
-      ↓
+      ↓ HTTP
 IoT Controller (FastAPI)
-      ↓ RabbitMQ (fanout)
+      ↓ MongoDB: raw telemetry
+RabbitMQ (fanout exchange)
+      ↓ AMQP
 Rule Engine
-      ↓
-MongoDB (alerts)
+      ↓ MongoDB: alerts/events
+Redis: short-lived rule state
 
-+ Prometheus → Grafana (метрики)
-+ Filebeat → Logstash → Elasticsearch → Kibana (логи)
+Prometheus → Grafana
+Filebeat → Logstash → Elasticsearch → Kibana
 ```
-
----
 
 ## Используемые технологии
 
 | Компонент | Технология |
-|---------|------------|
-| API | FastAPI (Python) |
-| Rule Engine | Python |
+| --- | --- |
+| Источник данных | Python data simulator |
+| API Gateway | Nginx |
+| API | FastAPI |
 | Message Broker | RabbitMQ |
-| Database | MongoDB |
-| Metrics | Prometheus |
-| Visualization | Grafana |
-| Logging | Filebeat, Logstash |
-| Search | Elasticsearch |
-| Logs UI | Kibana |
-| Reverse Proxy | Nginx |
-| Containerization | Docker, Docker Compose |
+| Rule Engine | Python |
+| Основное хранилище | MongoDB |
+| Состояние правил | Redis |
+| Метрики | Prometheus |
+| Визуализация | Grafana |
+| Логирование | Filebeat, Logstash, Elasticsearch, Kibana |
+| Развертывание | Docker Compose |
 
----
-
-## Быстрый старт
-
-### Требования
-
-- Docker >= 24
-- Docker Compose v2
-- Windows / Linux / macOS
-
----
-
-### Запуск проекта
-
-В корне репозитория выполните:
+## Запуск
 
 ```bash
 docker compose up --build
 ```
 
-Первый запуск может занять 3–5 минут (скачивание образов).
+Первый запуск может занять несколько минут из-за загрузки Docker-образов.
 
----
-
-### Проверка состояния контейнеров
+Для локального Python-окружения:
 
 ```bash
-docker compose ps
+.\.venv\Scripts\activate
+pip install -r requirements.txt
 ```
-
-Все сервисы должны быть в состоянии `running` или `healthy`.
-
----
 
 ## Доступ к сервисам
 
-| Сервис | URL | Логин / Пароль |
-|------|-----|----------------|
-| Gateway / API | http://localhost:8000 | — |
-| Prometheus | http://localhost:9090 | — |
+| Сервис | URL | Логин / пароль |
+| --- | --- | --- |
+| Gateway / API | http://localhost:8000 | - |
+| Prometheus | http://localhost:9090 | - |
 | Grafana | http://localhost:3000 | `admin / admin` |
 | RabbitMQ UI | http://localhost:15672 | `guest / guest` |
-| Kibana | http://localhost:5601 | — |
-| Elasticsearch | http://localhost:9200 | — |
+| Kibana | http://localhost:5601 | - |
+| Elasticsearch | http://localhost:9200 | - |
 
-Grafana при первом входе запросит смену пароля.
+Grafana автоматически получает Prometheus datasource и dashboard `IoT Port Platform`.
 
----
-## Rule Engine — реализованные правила
+## Rule Engine
 
-### CRANE_OVERLOAD
-- Условие: `load_weight > 20 тонн`
-- Тип: мгновенное
-- Severity: **HIGH**
+Реализованные правила:
 
----
+| Rule ID | Условие | Severity |
+| --- | --- | --- |
+| `CRANE_OVERLOAD` | `device_type=crane` и `load_weight > 20t` | HIGH |
+| `OVERHEAT_RISK_10` | `temperature > 60C` 10 сообщений подряд | MEDIUM |
+| `ERROR_STATUS_DURATION` | `status=error` 5 сообщений подряд | HIGH |
+| `DEVICE_CONNECTION_LOST` | нет телеметрии от устройства более 30 секунд | HIGH |
+| `ANOMALOUS_TELEMETRY` | аномальная температура или масса груза | MEDIUM |
 
-### OVERHEAT_RISK_10
-- Условие: `temperature > 60°C` **10 сообщений подряд**
-- Тип: длящееся
-- Severity: **MEDIUM**
-- Срабатывает один раз за эпизод (без спама)
+Redis хранит краткоживущее состояние для последовательных правил и `last_seen` устройств. Это позволяет масштабировать `rule-engine` без хранения state в памяти конкретного контейнера.
 
----
+## Нагрузка симулятора
 
-## Метрики (Prometheus)
+Дефолтная нагрузка в Docker Compose сделана безопасной для локального запуска:
 
-Основные метрики:
+```text
+DEVICE_COUNT=20
+MSG_RATE_PER_DEVICE=1
+```
+
+То есть примерно 20 сообщений в секунду. Нагрузку можно поднять через env-переменные в `docker-compose.yml`.
+
+## Метрики
+
+Ключевые метрики:
 
 - `telemetry_messages_processed_total`
+- `alerts_created_total`
 - `rules_triggered_total{rule_id}`
+- `rule_engine_messages_total{status}`
 - `rule_engine_processing_seconds`
 - `rule_engine_overheat_streak{device_id}`
+- `rule_engine_error_status_streak{device_id}`
 
----
+Prometheus также загружает alert rules из `observability/prometheus/alerts.rules.yml`.
 
-## Логирование (ELK stack)
+## Логирование
 
-- Логи всех контейнеров собираются через **Filebeat**
-- Обработка логов — **Logstash**
-- Хранение — **Elasticsearch**
-- Просмотр — **Kibana**
-- Формат логов — JSON
+Основные сервисы пишут структурированные JSON-логи. Filebeat собирает container logs, передает их в Logstash, после чего записи индексируются в Elasticsearch и доступны в Kibana.
 
----
+## Проверка
 
-## Тестирование и проверка
+После запуска контейнеров:
 
-Проект был протестирован вручную:
-
-- API `/ingest` — корректно принимает данные
-- RabbitMQ — сообщения доставляются
-- Rule Engine — правила срабатывают корректно
-- MongoDB — алерты сохраняются
-- Prometheus — метрики собираются
-- Grafana — дашборды отображаются
-- Kibana — логи доступны
-
----
-
-## Структура репозитория
-
-```
-.
-├── data-simulator/
-├── iot-controller/
-├── rule-engine/
-├── gateway/
-├── observability/
-│   ├── prometheus/
-│   ├── logstash/
-│   └── filebeat/
-├── docker-compose.yml
-└── README.md
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\healthcheck.ps1
 ```
 
----
+Скрипт проверяет gateway, ingest, RabbitMQ UI, MongoDB, Prometheus, загрузку alert rules, Grafana, Elasticsearch и Kibana. Метрики `rule-engine` проверяются через Prometheus, потому что порт `9101` не публикуется наружу и не мешает масштабированию.
 
-## Масштабирование (scale) `iot-controller` и `rule-engine`
+## Масштабирование
 
-> Важно: у **масштабируемых** сервисов не должно быть фиксированных `ports:` на хост (иначе будет конфликт портов).
-> Для доступа к API используем **gateway (nginx)** на `localhost:8000`, поэтому `iot-controller` можно масштабировать без публикации портов наружу.
-
-Команда масштабирования:
+`iot-controller` и `rule-engine` не публикуют фиксированные host-порты, поэтому их можно масштабировать:
 
 ```bash
 docker compose up -d --scale iot-controller=3 --scale rule-engine=3
 ```
 
-Проверка, что реплики поднялись:
-
-```bash
-docker compose ps
-```
-
-
+Входной трафик идет через Nginx на `localhost:8000`, а Prometheus использует Docker DNS discovery для поиска реплик.

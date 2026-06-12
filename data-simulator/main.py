@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-API_URL = os.getenv("API_URL", "http://iot-controller:8000/ingest")
+API_URL = os.getenv("API_URL", "http://localhost:8000/ingest")
 DEVICE_COUNT = int(os.getenv("DEVICE_COUNT", "50"))
 MSG_RATE_PER_DEVICE = float(os.getenv("MSG_RATE_PER_DEVICE", "1"))
 
@@ -18,6 +18,9 @@ OVERLOAD_PROB = float(os.getenv("OVERLOAD_PROB", "0.05"))
 OVERHEAT_PROB = float(os.getenv("OVERHEAT_PROB", "0.10"))
 OVERHEAT_EPISODE_LEN = int(os.getenv("OVERHEAT_EPISODE_LEN", "10"))
 
+ERROR_STATUS_PROB = float(os.getenv("ERROR_STATUS_PROB", "0.03"))
+ERROR_EPISODE_LEN = int(os.getenv("ERROR_EPISODE_LEN", "5"))
+
 # гарант: хотя бы один перегруз каждые N сообщений для первого крана
 FORCE_OVERLOAD_EVERY = int(os.getenv("FORCE_OVERLOAD_EVERY", "15"))
 
@@ -25,6 +28,7 @@ LOCATIONS = ["berth-1", "berth-2", "berth-3",
              "yard-A", "yard-B", "gate-1", "gate-2"]
 
 overheat_left: dict[int, int] = {}
+error_left: dict[int, int] = {}
 # чтобы принудительно делать перегруз периодически
 msg_counter: dict[int, int] = {}
 
@@ -71,9 +75,22 @@ def should_overload(device_id: int, device_type: str) -> bool:
     return random.random() < OVERLOAD_PROB
 
 
+def pick_status(device_id: int) -> str:
+    left = error_left.get(device_id, 0)
+    if left > 0:
+        error_left[device_id] = left - 1
+        return "error"
+
+    if random.random() < ERROR_STATUS_PROB:
+        error_left[device_id] = max(ERROR_EPISODE_LEN - 1, 0)
+        return "error"
+
+    return random.choice(["operating", "idle"])
+
+
 def generate_payload(device_id: int, device_type: str) -> dict:
     location = random.choice(LOCATIONS)
-    status = random.choice(["operating", "idle"])
+    status = pick_status(device_id)
 
     # Температура: эпизоды по 10 подряд
     if should_overheat(device_id):
@@ -122,6 +139,8 @@ async def main():
         f"OVERLOAD_PROB={OVERLOAD_PROB}, FORCE_OVERLOAD_EVERY={FORCE_OVERLOAD_EVERY}")
     print(
         f"OVERHEAT_PROB={OVERHEAT_PROB}, OVERHEAT_EPISODE_LEN={OVERHEAT_EPISODE_LEN}")
+    print(
+        f"ERROR_STATUS_PROB={ERROR_STATUS_PROB}, ERROR_EPISODE_LEN={ERROR_EPISODE_LEN}")
 
     device_types = pick_device_types(DEVICE_COUNT)
     print("Device types:", device_types)

@@ -6,9 +6,9 @@ filebeat.autodiscover:
         - condition:
             or:
               - contains:
-                  docker.container.name: "iot-iot-controller"
+                  docker.container.name: "iot-controller"
               - contains:
-                  docker.container.name: "iot-rule-engine"
+                  docker.container.name: "rule-engine"
               - contains:
                   docker.container.name: "iot-data-simulator"
           config:

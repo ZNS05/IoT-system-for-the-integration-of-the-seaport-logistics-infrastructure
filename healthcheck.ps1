@@ -20,11 +20,30 @@ function Check {
     }
 }
 
+function CheckPrometheusUp {
+    param (
+        [string]$Job
+    )
+
+    $query = [uri]::EscapeDataString("up{job=`"$Job`"}")
+    $r = Invoke-RestMethod "http://localhost:9090/api/v1/query?query=$query" -TimeoutSec 5
+    if ($r.status -ne "success") { throw "Prometheus query failed for job=$Job" }
+
+    $results = @($r.data.result)
+    if ($results.Count -eq 0) { throw "No Prometheus targets for job=$Job" }
+
+    foreach ($item in $results) {
+        if ($item.value[1] -ne "1") {
+            throw "Target $($item.metric.instance) for job=$Job is down"
+        }
+    }
+}
+
 # -------------------------------
 # 1. Gateway / iot-controller
 # -------------------------------
-Check "Gateway → iot-controller (/metrics)" {
-    $r = Invoke-WebRequest -UseBasicParsing http://localhost:8000/metrics -TimeoutSec 5
+Check "Gateway → iot-controller (/health)" {
+    $r = Invoke-WebRequest -UseBasicParsing http://localhost:8000/health -TimeoutSec 5
     if ($r.StatusCode -ne 200) { throw "HTTP $($r.StatusCode)" }
 }
 
@@ -60,11 +79,10 @@ Check "RabbitMQ management UI" {
 }
 
 # -------------------------------
-# 4. rule-engine metrics
+# 4. rule-engine metrics через Prometheus
 # -------------------------------
-Check "rule-engine (/metrics)" {
-    $r = Invoke-WebRequest -UseBasicParsing http://localhost:9101/metrics -TimeoutSec 5
-    if ($r.StatusCode -ne 200) { throw "HTTP $($r.StatusCode)" }
+Check "rule-engine (/metrics via Prometheus)" {
+    CheckPrometheusUp "rule-engine"
 }
 
 # -------------------------------
@@ -81,6 +99,25 @@ Check "MongoDB alerts collection accessible" {
 Check "Prometheus API" {
     $r = Invoke-RestMethod http://localhost:9090/api/v1/status/runtimeinfo
     if ($r.status -ne "success") { throw "Prometheus status != success" }
+}
+
+# -------------------------------
+# 6.1. Prometheus alert rules
+# -------------------------------
+Check "Prometheus alert rules loaded" {
+    $r = Invoke-RestMethod http://localhost:9090/api/v1/rules
+    if ($r.status -ne "success") { throw "Prometheus rules API failed" }
+
+    $ruleNames = @()
+    foreach ($group in @($r.data.groups)) {
+        foreach ($rule in @($group.rules)) {
+            $ruleNames += $rule.name
+        }
+    }
+
+    if ($ruleNames -notcontains "ServiceDown") {
+        throw "ServiceDown alert rule is not loaded"
+    }
 }
 
 # -------------------------------

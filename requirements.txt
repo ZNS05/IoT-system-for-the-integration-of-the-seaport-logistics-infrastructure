@@ -1,0 +1,3 @@
+-r iot-controller/requirements.txt
+-r rule-engine/requirements.txt
+-r data-simulator/requirements.txt

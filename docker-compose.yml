@@ -35,16 +35,21 @@ services:
       - "8000"
     environment:
       MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: iot_port
       RABBIT_HOST: rabbitmq
       RABBIT_EXCHANGE: iot_data
+      RABBIT_QUEUE: rule_engine_input
+      PUBLISH_QUEUE_MAX: "5000"
     depends_on:
-      - mongo
-      - rabbitmq
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=2).read(); print('ok')\" >/dev/null 2>&1"
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read(); print('ok')\" >/dev/null 2>&1"
         ]
       interval: 10s
       timeout: 5s
@@ -64,17 +69,25 @@ services:
       MONGO_DB: iot_port
       ALERTS_COLLECTION: alerts
       METRICS_PORT: "9101"
+      RABBIT_PREFETCH_COUNT: "50"
+      PROCESSING_DELAY_SEC: "0"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      OVERHEAT_CONSECUTIVE_REQUIRED: "10"
+      ERROR_STATUS_CONSECUTIVE_REQUIRED: "5"
+      CONNECTION_LOST_AFTER_SEC: "30"
     depends_on:
-      - mongo
-      - rabbitmq
-      - redis
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2).read(); print('ok')\" >/dev/null 2>&1"
+          "python -c \"import os, urllib.request, pymongo, redis, pika; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2).read(); pymongo.MongoClient(os.getenv('MONGO_URI'), serverSelectionTimeoutMS=2000).admin.command('ping'); redis.Redis(host=os.getenv('REDIS_HOST'), port=int(os.getenv('REDIS_PORT'))).ping(); c=pika.BlockingConnection(pika.ConnectionParameters(host=os.getenv('RABBIT_HOST'), connection_attempts=1)); c.close(); print('ok')\" >/dev/null 2>&1"
         ]
       interval: 10s
       timeout: 5s
@@ -86,28 +99,38 @@ services:
     container_name: iot-data-simulator
     restart: unless-stopped
     depends_on:
-      - iot-controller
+      gateway:
+        condition: service_healthy
     environment:
-      API_URL: "http://iot-controller:8000/ingest"
-      DEVICE_COUNT: "50"
-      MSG_RATE_PER_DEVICE: "2"
+      API_URL: "http://gateway/ingest"
+      DEVICE_COUNT: "20"
+      MSG_RATE_PER_DEVICE: "1"
       CRANE_RATIO: "0.3"
       FORKLIFT_RATIO: "0.4"
       TRUCK_RATIO: "0.3"
       OVERLOAD_PROB: "0.15"
       OVERHEAT_PROB: "0.10"
       OVERHEAT_EPISODE_LEN: "10"
+      ERROR_STATUS_PROB: "0.03"
+      ERROR_EPISODE_LEN: "5"
 
   gateway:
     image: nginx:alpine
     container_name: iot-gateway
     restart: unless-stopped
     depends_on:
-      - iot-controller
+      iot-controller:
+        condition: service_healthy
     ports:
       - "8000:80"
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
@@ -163,19 +186,28 @@ services:
     restart: unless-stopped
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.rules.yml:/etc/prometheus/alerts.rules.yml:ro
     ports:
       - "9090:9090"
     depends_on:
-      - iot-controller
-      - rule-engine
+      iot-controller:
+        condition: service_healthy
+      rule-engine:
+        condition: service_healthy
 
   grafana:
     image: grafana/grafana:latest
     container_name: iot-grafana
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -187,6 +219,12 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
 
 
 volumes:
